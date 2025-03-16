@@ -12,6 +12,8 @@ const app = express();
 // Middleware
 app.use(cors());
 app.use(bodyParser.json());
+const testRoutes = require('./test');
+app.use('/admin',testRoutes);
 
 // Setup PostgreSQL connection
 const pool = new Pool({
@@ -22,7 +24,7 @@ const pool = new Pool({
   port: process.env.DB_PORT,
 });
 
-// ✅ Middleware to verify JWT token
+// Middleware to verify JWT token
 const authenticateUser = (req, res, next) => {
   const authHeader = req.header('Authorization');
   const token = authHeader && authHeader.split(' ')[1];
@@ -38,21 +40,44 @@ const authenticateUser = (req, res, next) => {
   }
 };
 
-// ✅ Fetch all jobs (NEWLY ADDED ROUTE)
-app.get('/jobs', async (req, res) => {
-    try {
-        const jobsList = await pool.query('SELECT * FROM jobs');
-        res.json({ jobs: jobsList.rows });
-    } catch (error) {
-        console.error('Error fetching jobs:', error);
-        res.status(500).json({ message: 'Server error. Please try again later.' });
-    }
+// ✅ NEW: Create a Job (Authenticated Users Only)
+app.post('/create-job', authenticateUser, async (req, res) => {
+  const { title, description, location, skills } = req.body;
+  const postedBy = req.user.userId;
+
+  // Validate required fields
+  if (!title || !description) {
+    return res.status(400).json({ message: 'Title and description are required.' });
+  }
+
+  try {
+    const result = await pool.query(
+      'INSERT INTO jobs (title, description, location, skills, posted_by) VALUES ($1, $2, $3, $4, $5) RETURNING *',
+      [title, description, location, skills ? JSON.stringify(skills) : null, postedBy]
+    );
+
+    res.json({ message: 'Job created successfully!', job: result.rows[0] });
+  } catch (error) {
+    console.error('Error creating job:', error);
+    res.status(500).json({ message: 'Server error. Please try again.' });
+  }
 });
 
-// ✅ User Registration Route
+// Fetch all jobs
+app.get('/jobs', async (req, res) => {
+  try {
+    const jobsList = await pool.query('SELECT * FROM jobs');
+    res.json({ jobs: jobsList.rows });
+  } catch (error) {
+    console.error('Error fetching jobs:', error);
+    res.status(500).json({ message: 'Server error. Please try again later.' });
+  }
+});
+
+// User Registration Route
 app.post('/register', async (req, res) => {
   const { username, email, password } = req.body;
-
+  console.log(username); 
   if (!username || !email || !password) {
     return res.status(400).json({ message: 'Username, email, and password are required.' });
   }
@@ -78,7 +103,7 @@ app.post('/register', async (req, res) => {
   }
 });
 
-// ✅ User Login Route
+// User Login Route
 app.post('/login', async (req, res) => {
   const { email, password } = req.body;
   if (!email || !password) {
@@ -105,7 +130,7 @@ app.post('/login', async (req, res) => {
   }
 });
 
-// ✅ Profile Update Route (Authenticated Users Only)
+// Profile Update Route (Authenticated Users Only)
 app.put('/update-profile', authenticateUser, async (req, res) => {
   let { full_name, mobile, role, bio, industry_interests, social_links } = req.body;
   const userId = req.user.userId;
@@ -145,31 +170,121 @@ app.put('/update-profile', authenticateUser, async (req, res) => {
   }
 });
 
-// ✅ Accept a Job (Authenticated Users Only)
+// Accept a Job (Authenticated Users Only)
 app.put('/accept-job/:jobId', authenticateUser, async (req, res) => {
-    const jobId = req.params.jobId;
-    const userId = req.user.userId;
+  const jobId = req.params.jobId;
+  const userId = req.user.userId;
 
-    try {
-        const jobCheck = await pool.query('SELECT * FROM jobs WHERE id = $1', [jobId]);
-        if (jobCheck.rows.length === 0) {
-            return res.status(404).json({ message: 'Job not found' });
-        }
-
-        const result = await pool.query(
-            'UPDATE jobs SET accepted_by = $1 WHERE id = $2 RETURNING *',
-            [userId, jobId]
-        );
-
-        res.json({ message: 'Job accepted successfully!', job: result.rows[0] });
-    } catch (error) {
-        console.error('Error accepting job:', error);
-        res.status(500).json({ message: 'Server error. Please try again.' });
+  try {
+    const jobCheck = await pool.query('SELECT * FROM jobs WHERE id = $1', [jobId]);
+    if (jobCheck.rows.length === 0) {
+      return res.status(404).json({ message: 'Job not found' });
     }
+
+    const result = await pool.query(
+      'UPDATE jobs SET accepted_by = $1 WHERE id = $2 RETURNING *',
+      [userId, jobId]
+    );
+
+    res.json({ message: 'Job accepted successfully!', job: result.rows[0] });
+  } catch (error) {
+    console.error('Error accepting job:', error);
+    res.status(500).json({ message: 'Server error. Please try again.' });
+  }
+});
+
+// Send a Message (Authenticated Users Only)
+app.post('/send-message', authenticateUser, async (req, res) => {
+  const { jobId, message } = req.body;
+  const senderId = req.user.userId;
+
+  if (!jobId || !message) {
+    return res.status(400).json({ message: 'Job ID and message are required.' });
+  }
+
+  try {
+    const jobResult = await pool.query('SELECT posted_by FROM jobs WHERE id = $1', [jobId]);
+    if (jobResult.rows.length === 0) {
+      return res.status(404).json({ message: 'Job not found.' });
+    }
+
+    const receiverId = jobResult.rows[0].posted_by;
+
+    if (senderId === receiverId) {
+      return res.status(400).json({ message: 'You cannot send a message to yourself.' });
+    }
+
+    const result = await pool.query(
+      'INSERT INTO messages (job_id, sender_id, receiver_id, message) VALUES ($1, $2, $3, $4) RETURNING *',
+      [jobId, senderId, receiverId, message]
+    );
+
+    res.json({ message: 'Message sent successfully!', chatMessage: result.rows[0] });
+  } catch (error) {
+    console.error('Error sending message:', error);
+    res.status(500).json({ message: 'Server error. Please try again.' });
+  }
+});
+
+// Retrieve Chat Messages for a Job (Authenticated Users Only)
+app.get('/chat/:jobId', authenticateUser, async (req, res) => {
+  const jobId = req.params.jobId;
+  const userId = req.user.userId;
+
+  try {
+    // Fetch the job to verify it exists and get the job poster's ID
+    const jobResult = await pool.query('SELECT posted_by FROM jobs WHERE id = $1', [jobId]);
+    if (jobResult.rows.length === 0) {
+      return res.status(404).json({ message: 'Job not found.' });
+    }
+
+    const jobPosterId = jobResult.rows[0].posted_by;
+
+    let query;
+    let queryParams;
+
+    // Case 1: Authenticated user is the job poster (e.g., John)
+    if (userId === jobPosterId) {
+      // Fetch all messages for this job where the authenticated user (John) is either sender or receiver
+      query = `
+        SELECT m.*, u.username AS sender_username 
+        FROM messages m 
+        JOIN users u ON m.sender_id = u.id 
+        WHERE m.job_id = $1 
+        AND (m.sender_id = $2 OR m.receiver_id = $2)
+        ORDER BY m.created_at ASC;
+      `;
+      queryParams = [jobId, userId];
+    } else {
+      // Case 2: Authenticated user is not the job poster (e.g., Jane)
+      // Fetch messages for this job where the authenticated user (Jane) is either sender or receiver,
+      // and the other party is the job poster (John)
+      query = `
+        SELECT m.*, u.username AS sender_username 
+        FROM messages m 
+        JOIN users u ON m.sender_id = u.id 
+        WHERE m.job_id = $1 
+        AND (
+          (m.sender_id = $2 AND m.receiver_id = $3) 
+          OR 
+          (m.sender_id = $3 AND m.receiver_id = $2)
+        ) 
+        ORDER BY m.created_at ASC;
+      `;
+      queryParams = [jobId, userId, jobPosterId];
+    }
+
+    const result = await pool.query(query, queryParams);
+
+    res.json({ messages: result.rows });
+  } catch (error) {
+    console.error('Error retrieving messages:', error);
+    res.status(500).json({ message: 'Server error. Please try again.' });
+  }
 });
 
 // Start the server
 const PORT = 5000;
 app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
+  console.log('Server running on port ${PORT}');
 });
